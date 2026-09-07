@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+backend/.env
+backend/tmp/
+backend/test-results/
+frontend/dist/
+*.log

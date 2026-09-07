@@ -1,0 +1,292 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TestType {
+  WEB
+  API
+  WEB_API
+}
+
+enum TestCategory {
+  SMOKE
+  REGRESSION
+  SANITY
+  E2E
+}
+
+enum HttpMethod {
+  GET
+  POST
+  PUT
+  PATCH
+  DELETE
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  PASSED
+  FAILED
+  SKIPPED
+}
+
+enum LocatorStrategy {
+  TESTID
+  ROLE
+  LABEL
+  PLACEHOLDER
+  TEXT
+  CSS
+}
+
+enum HealMethod {
+  HEURISTIC
+  LLM
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime  @default(now())
+  projects     Project[]
+}
+
+model Project {
+  id           String        @id @default(cuid())
+  name         String
+  ownerId      String
+  owner        User          @relation(fields: [ownerId], references: [id])
+  createdAt    DateTime      @default(now())
+  environments Environment[]
+  modules      TestModule[]
+  tests        Test[]
+  suites       Suite[]
+  components   Component[]
+  dataSets     DataSet[]
+
+  @@unique([ownerId, name])
+}
+
+// Reusable Components: a named, shareable step-list (e.g. a "login" flow) other tests
+// can insert by reference via a { action: 'component', componentId } step, instead of
+// re-recording the same flow in every test.
+model Component {
+  id        String   @id @default(cuid())
+  name      String
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  steps     Json     @default("[]")
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, name])
+}
+
+// A named set of data rows (e.g. from a CSV/JSON upload) a test can be run against once
+// per row — Data-Driven Testing.
+model DataSet {
+  id        String   @id @default(cuid())
+  name      String
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rows      Json     @default("[]")
+  createdAt DateTime @default(now())
+  tests     Test[]
+
+  @@unique([projectId, name])
+}
+
+model Environment {
+  id        String     @id @default(cuid())
+  name      String
+  projectId String
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  baseUrl   String?
+  variables Variable[]
+  tests     Test[]
+  createdAt DateTime   @default(now())
+
+  @@unique([projectId, name])
+}
+
+model Variable {
+  id            String      @id @default(cuid())
+  key           String
+  value         String
+  isSecret      Boolean     @default(false)
+  environmentId String
+  environment   Environment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+
+  @@unique([environmentId, key])
+}
+
+model TestModule {
+  id        String   @id @default(cuid())
+  name      String
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tests     Test[]
+
+  @@unique([projectId, name])
+}
+
+model Test {
+  id                String       @id @default(cuid())
+  name              String
+  type              TestType     @default(WEB)
+  category          TestCategory @default(REGRESSION)
+  projectId         String
+  project           Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  moduleId          String?
+  module            TestModule?  @relation(fields: [moduleId], references: [id])
+  targetUrl         String?
+  recordInIncognito Boolean      @default(true)
+  apiMethod         HttpMethod?
+  apiEndpoint       String?
+  apiHeaders        Json?
+  apiBody           Json?
+  steps             Json         @default("[]")
+  retries           Int          @default(0)
+  dataSetId         String?
+  dataSet           DataSet?     @relation(fields: [dataSetId], references: [id], onDelete: SetNull)
+  environmentId     String?
+  environment       Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  viewportWidth     Int?
+  viewportHeight    Int?
+  userAgent         String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  suiteLinks        SuiteTest[]
+  runs              Run[]
+  locators          Locator[]
+}
+
+model Locator {
+  id           String          @id @default(cuid())
+  testId       String
+  test         Test            @relation(fields: [testId], references: [id], onDelete: Cascade)
+  key          String
+  description  String?
+  strategy     LocatorStrategy
+  value        String
+  roleName     String?
+  fallbacks    Json            @default("[]")
+  discoveredAt DateTime        @default(now())
+
+  // What the step itself currently specifies — kept separate from strategy/value (the
+  // ACTIVE, possibly-healed locator actually used at execution time) so re-materializing
+  // on every "Save steps"/NLP-generate can tell "the step still means the same element,
+  // don't discard the heal" apart from "the user genuinely retargeted this step, discard
+  // the stale heal and start over." Without this, every re-save was silently reverting a
+  // healed locator back to its original (often broken) selector, forcing self-healing to
+  // repeat the exact same repair on every single run.
+  sourceStrategy LocatorStrategy?
+  sourceValue    String?
+  sourceRoleName String?
+
+  @@unique([testId, key])
+}
+
+model Suite {
+  id        String      @id @default(cuid())
+  name      String
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tests     SuiteTest[]
+  scheduler Scheduler?
+  runs      SuiteRun[]
+  createdAt DateTime    @default(now())
+
+  @@unique([projectId, name])
+}
+
+model SuiteTest {
+  suiteId String
+  suite   Suite  @relation(fields: [suiteId], references: [id], onDelete: Cascade)
+  testId  String
+  test    Test   @relation(fields: [testId], references: [id], onDelete: Cascade)
+  order   Int    @default(0)
+
+  @@id([suiteId, testId])
+}
+
+model Scheduler {
+  id             String   @id @default(cuid())
+  suiteId        String   @unique
+  suite          Suite    @relation(fields: [suiteId], references: [id], onDelete: Cascade)
+  cronExpression String
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+}
+
+model Run {
+  id           String    @id @default(cuid())
+  testId       String
+  test         Test      @relation(fields: [testId], references: [id], onDelete: Cascade)
+  suiteRunId   String?
+  suiteRun     SuiteRun? @relation(fields: [suiteRunId], references: [id])
+  status       RunStatus @default(QUEUED)
+  browser      String    @default("chromium")
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  durationMs   Int?
+  errorMessage String?
+  tracePath    String?
+  videoPath    String?
+  screenshotPath String?
+  headed       Boolean   @default(false)
+  dataRowIndex Int?
+  dataRow      Json?
+  healEvents   HealEvent[]
+  stepEvents   RunStepEvent[]
+}
+
+// Per-step progress emitted by the running spec itself (see generate-runnable-spec.ts) and
+// persisted as it arrives, so a run's execution can be watched step-by-step while it's
+// still RUNNING (polled from the frontend) and re-viewed afterward as a report — mirrors
+// the "live steps + self-healing in progress" panel competitor tools show.
+model RunStepEvent {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  index     Int
+  action    String
+  status    String // running | passed | failed | healing | healed
+  message   String?
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+}
+
+model SuiteRun {
+  id         String    @id @default(cuid())
+  suiteId    String
+  suite      Suite     @relation(fields: [suiteId], references: [id], onDelete: Cascade)
+  status     RunStatus @default(QUEUED)
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  runs       Run[]
+}
+
+model HealEvent {
+  id             String     @id @default(cuid())
+  runId          String
+  run            Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  locatorKey     String
+  failedStrategy LocatorStrategy
+  healedStrategy LocatorStrategy
+  method         HealMethod
+  provider       String?
+  model          String?
+  oldValue       String
+  newValue       String
+  verified       Boolean    @default(false)
+  createdAt      DateTime   @default(now())
+}
