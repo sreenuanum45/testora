@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
 import { BullModule } from '@nestjs/bullmq';
 import { PrismaModule } from './prisma/prisma.module';
 import { LlmModule } from './llm/llm.module';
@@ -46,5 +47,6 @@ import { DataSetsModule } from './datasets/datasets.module';
     ComponentsModule,
     DataSetsModule,
   ],
+  controllers: [AppController],
 })
 export class AppModule {}

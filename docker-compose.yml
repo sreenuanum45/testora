@@ -39,7 +39,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://testora:testora@postgres:5432/testora
+      DATABASE_URL: ${DATABASE_URL:-postgresql://testora:testora@postgres:5432/testora}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
