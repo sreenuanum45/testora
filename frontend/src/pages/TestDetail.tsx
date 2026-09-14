@@ -31,6 +31,7 @@ import type {
   Step,
   Test,
 } from "../api/types";
+import RecordingViewer from "../components/RecordingViewer";
 import RunCompareModal from "../components/RunCompareModal";
 import StepBuilder from "../components/StepBuilder";
 import RunProgressPanel from "../components/RunProgressPanel";
@@ -56,6 +57,7 @@ export default function TestDetail(): JSX.Element {
     searchParams.get("recording") === "1",
   );
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [vncEnabled, setVncEnabled] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [dataSets, setDataSets] = useState<DataSet[]>([]);
   const [exportedCode, setExportedCode] = useState<string | null>(null);
@@ -139,11 +141,12 @@ export default function TestDetail(): JSX.Element {
     if (!recording || !projectId || !testId) return;
     const interval = setInterval(() => {
       api
-        .get<{ recording: boolean; elapsedMs: number | null }>(
+        .get<{ recording: boolean; elapsedMs: number | null; vncEnabled: boolean }>(
           `/projects/${projectId}/tests/${testId}/recording/status`,
         )
         .then((s) => {
           setElapsedMs(s.elapsedMs ?? 0);
+          setVncEnabled(s.vncEnabled);
           if (!s.recording) {
             // The recorder window can be closed directly rather than via the "Stop
             // Recording" button — the backend still saves whatever was captured either
@@ -572,17 +575,22 @@ export default function TestDetail(): JSX.Element {
         {message && <p className="text-sm text-brand-600">{message}</p>}
 
         {recording && (
-          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-center justify-between">
-            <span className="text-sm text-emerald-700">
-              ● Recording in progress — {(elapsedMs / 1000).toFixed(0)}s. A
-              browser window is open on the server.
-            </span>
-            <button
-              className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs"
-              onClick={stopRecording}
-            >
-              Stop Recording
-            </button>
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-emerald-700">
+                ● Recording in progress — {(elapsedMs / 1000).toFixed(0)}s.{" "}
+                {vncEnabled
+                  ? "Click and type in the live view below."
+                  : "A browser window is open on the server."}
+              </span>
+              <button
+                className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs shrink-0"
+                onClick={stopRecording}
+              >
+                Stop Recording
+              </button>
+            </div>
+            {vncEnabled && testId && <RecordingViewer testId={testId} />}
           </div>
         )}
 

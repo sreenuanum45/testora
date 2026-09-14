@@ -13,6 +13,12 @@ RUN npm install
 
 RUN npx playwright install-deps chromium && npx playwright install chromium
 
+# Xvfb + x11vnc: live "Start Recording" (Playwright Codegen) needs a real, visible browser
+# window, but this container has no display of its own. Xvfb gives Codegen a virtual one to
+# render into; x11vnc exposes that virtual screen over VNC, which recording.service.ts's
+# WebSocket relay (see vnc-relay.ts) streams to the browser tab that started the recording.
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb x11vnc && rm -rf /var/lib/apt/lists/*
+
 COPY prisma ./prisma
 RUN npx prisma generate
 
