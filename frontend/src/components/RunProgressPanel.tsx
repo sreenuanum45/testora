@@ -1,6 +1,9 @@
-import { X } from "lucide-react";
+import { useState } from "react";
+import { X, Sparkles, Loader2 } from "lucide-react";
 import LiveStepLog from "./LiveStepLog";
-import type { RunStatus, Step } from "../api/types";
+import { api } from "../api/client";
+import { useAppStore } from "../store/appStore";
+import type { FailureExplanation, RunStatus, Step } from "../api/types";
 
 function StatusPill({ status }: { status: RunStatus }): JSX.Element {
   const colors: Record<RunStatus, string> = {
@@ -24,6 +27,7 @@ interface RunProgressPanelProps {
   runStatus: RunStatus;
   steps: Step[];
   testName: string;
+  errorMessage?: string | null;
   onClose: () => void;
 }
 
@@ -38,8 +42,25 @@ export default function RunProgressPanel({
   runStatus,
   steps,
   testName,
+  errorMessage,
   onClose,
 }: RunProgressPanelProps): JSX.Element {
+  const projectId = useAppStore((s) => s.currentProjectId);
+  const [explanation, setExplanation] = useState<FailureExplanation | null>(null);
+  const [explaining, setExplaining] = useState(false);
+  const [explainError, setExplainError] = useState<string | null>(null);
+
+  const requestExplanation = (): void => {
+    if (!projectId || explaining) return;
+    setExplaining(true);
+    setExplainError(null);
+    api
+      .post<FailureExplanation>(`/projects/${projectId}/runs/${runId}/explain`)
+      .then(setExplanation)
+      .catch((err: Error) => setExplainError(err.message))
+      .finally(() => setExplaining(false));
+  };
+
   return (
     <div className="w-full max-w-md shrink-0 sticky top-6 bg-panel border border-border rounded-2xl shadow-card flex flex-col max-h-[calc(100vh-3rem)]">
       <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
@@ -62,6 +83,44 @@ export default function RunProgressPanel({
         </button>
       </div>
       <div className="flex-1 overflow-y-auto p-4">
+        {/* The step log only ever shows a per-STEP failure — a run that dies from a
+         *  whole-test timeout or a crash before any step's catch block runs leaves every
+         *  step frozen at "running" with no red text anywhere, while the badge above says
+         *  FAILED with no visible reason. Surface the run's own summarized error (always
+         *  captured server-side — see execution.processor.ts's summarizePlaywrightOutput)
+         *  directly, independent of whether a step event ever recorded one. */}
+        {runStatus === "FAILED" && errorMessage && (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3">
+            <div className="text-xs font-semibold text-red-700 mb-1.5">
+              Failure reason
+            </div>
+            <pre className="text-xs text-red-700 whitespace-pre-wrap break-words max-h-56 overflow-y-auto font-mono">
+              {errorMessage}
+            </pre>
+
+            {!explanation && (
+              <button
+                onClick={requestExplanation}
+                disabled={explaining}
+                className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-red-200 text-red-700 text-xs font-semibold hover:bg-red-100 disabled:opacity-60"
+              >
+                {explaining ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {explaining ? "Thinking…" : "Explain with AI"}
+              </button>
+            )}
+            {explainError && <p className="mt-2 text-xs text-red-600">{explainError}</p>}
+            {explanation && (
+              <div className="mt-3 rounded-lg bg-white border border-red-200 p-3">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-brand-600 mb-1.5">
+                  <Sparkles size={12} />
+                  AI explanation
+                </div>
+                <p className="text-xs text-ink leading-relaxed">{explanation.summary}</p>
+                <p className="text-[10px] text-muted mt-2">via {explanation.provider}</p>
+              </div>
+            )}
+          </div>
+        )}
         <LiveStepLog
           runId={runId}
           runStatus={runStatus}

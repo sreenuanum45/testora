@@ -65,6 +65,7 @@ model Project {
   ownerId      String
   owner        User          @relation(fields: [ownerId], references: [id])
   createdAt    DateTime      @default(now())
+  webhookUrl   String?
   environments Environment[]
   modules      TestModule[]
   tests        Test[]
@@ -161,6 +162,10 @@ model Test {
   viewportWidth     Int?
   viewportHeight    Int?
   userAgent         String?
+  tags              String[]     @default([])
+  quarantined       Boolean      @default(false)
+  quarantinedAt     DateTime?
+  visualBaselinePath String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   suiteLinks        SuiteTest[]
@@ -244,6 +249,8 @@ model Run {
   headed       Boolean   @default(false)
   dataRowIndex Int?
   dataRow      Json?
+  visualDiffPercent Float?
+  visualDiffPath    String?
   healEvents   HealEvent[]
   stepEvents   RunStepEvent[]
 }

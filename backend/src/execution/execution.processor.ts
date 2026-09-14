@@ -3,10 +3,14 @@ import type { Job } from 'bullmq';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PNG } from 'pngjs';
+import pixelmatch from 'pixelmatch';
 import { LocatorStrategy as PrismaLocatorStrategy } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { generateRunnableSpec } from './generate-runnable-spec';
 import { flattenComponentSteps, applyDataRow, applyVariables, substituteVariables } from '../tests/step-flattener';
+import { classifyHealth } from '../tests/health-classification';
 import type { RecordedStep } from '../recording/step-parser';
 import type { ExecutionJobData } from './execution.service';
 import type { HealEventPayload } from './runtime/types';
@@ -122,7 +126,10 @@ interface TestWithEnvironment {
 
 @Processor('execution')
 export class ExecutionProcessor extends WorkerHost {
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {
     super();
   }
 
@@ -137,6 +144,7 @@ export class ExecutionProcessor extends WorkerHost {
       ? Object.fromEntries(run.test.environment.variables.map((v) => [v.key, v.value]))
       : null;
 
+    let finalStatus: 'PASSED' | 'FAILED' = 'PASSED';
     try {
       const results: StepResult[] = [];
       // Functional + API: validate the backend API AND the frontend flow together — both
@@ -151,6 +159,7 @@ export class ExecutionProcessor extends WorkerHost {
       }
 
       const passed = results.every((r) => r.passed);
+      finalStatus = passed ? 'PASSED' : 'FAILED';
       const durationMs = results.reduce((sum, r) => sum + r.durationMs, 0);
       const errorMessage = results.find((r) => !r.passed)?.errorMessage ?? null;
       const tracePath = results.find((r) => r.tracePath)?.tracePath;
@@ -159,16 +168,73 @@ export class ExecutionProcessor extends WorkerHost {
 
       await this.prisma.run.update({
         where: { id: run.id },
-        data: { status: passed ? 'PASSED' : 'FAILED', finishedAt: new Date(), durationMs, errorMessage, tracePath, videoPath, screenshotPath },
+        data: { status: finalStatus, finishedAt: new Date(), durationMs, errorMessage, tracePath, videoPath, screenshotPath },
       });
+
+      await this.diffAgainstVisualBaseline(run.id, run.test.visualBaselinePath, screenshotPath);
     } catch (err) {
+      finalStatus = 'FAILED';
       await this.prisma.run.update({
         where: { id: run.id },
         data: { status: 'FAILED', finishedAt: new Date(), errorMessage: err instanceof Error ? err.message : String(err) },
       });
     }
 
-    if (run.suiteRunId) await this.maybeFinalizeSuiteRun(run.suiteRunId);
+    await this.maybeAutoQuarantine(run.test.id, run.test.quarantined);
+
+    if (run.suiteRunId) {
+      await this.maybeFinalizeSuiteRun(run.suiteRunId);
+    } else if (finalStatus === 'FAILED') {
+      const project = await this.prisma.project.findUnique({ where: { id: run.test.projectId }, select: { webhookUrl: true } });
+      if (project?.webhookUrl) {
+        await this.notifications.post(project.webhookUrl, `❌ Test "${run.test.name}" failed. View it in Testora.`);
+      }
+    }
+  }
+
+  /** The run that first pushes a test's last-10-run history into FLAKY (mixed pass/fail,
+   *  see classifyHealth) auto-quarantines it. Never re-quarantines a test the user has
+   *  manually un-quarantined — this only flips false -> true, so it can't fight a user who
+   *  consciously decided to keep a flaky test running. */
+  private async maybeAutoQuarantine(testId: string, alreadyQuarantined: boolean): Promise<void> {
+    if (alreadyQuarantined) return;
+    const recent = await this.prisma.run.findMany({
+      where: { testId },
+      orderBy: { startedAt: 'desc' },
+      take: 10,
+      select: { status: true },
+    });
+    const statuses = recent.map((r) => r.status).filter((s): s is 'PASSED' | 'FAILED' => s === 'PASSED' || s === 'FAILED');
+    if (classifyHealth(statuses) === 'FLAKY') {
+      await this.prisma.test.update({ where: { id: testId }, data: { quarantined: true, quarantinedAt: new Date() } });
+    }
+  }
+
+  /** Visual regression: compares this run's own screenshot against the test's stored
+   *  baseline (set via TestsService.setVisualBaseline) with pixelmatch. Purely informational
+   *  — it records a diff percentage/image, it never changes the run's PASSED/FAILED status.
+   *  A dimension mismatch (baseline predates a viewport change, etc.) is treated as "not
+   *  comparable" rather than an error. Wrapped so a diffing bug can never break run
+   *  finalization, which has already happened by the time this runs. */
+  private async diffAgainstVisualBaseline(runId: string, baselinePath: string | null, screenshotPath: string | undefined): Promise<void> {
+    if (!baselinePath || !screenshotPath) return;
+    if (!existsSync(baselinePath) || !existsSync(screenshotPath)) return;
+    try {
+      const baseline = PNG.sync.read(readFileSync(baselinePath));
+      const actual = PNG.sync.read(readFileSync(screenshotPath));
+      if (baseline.width !== actual.width || baseline.height !== actual.height) return;
+
+      const diff = new PNG({ width: baseline.width, height: baseline.height });
+      const diffPixels = pixelmatch(baseline.data, actual.data, diff.data, baseline.width, baseline.height, { threshold: 0.1 });
+      const visualDiffPercent = (diffPixels / (baseline.width * baseline.height)) * 100;
+
+      const diffPath = join(EXEC_ROOT, runId, 'output', 'diff.png');
+      writeFileSync(diffPath, PNG.sync.write(diff));
+
+      await this.prisma.run.update({ where: { id: runId }, data: { visualDiffPercent, visualDiffPath: diffPath } });
+    } catch (err) {
+      console.error(`Visual diff failed for run ${runId}:`, err);
+    }
   }
 
   /** A Suite fans each of its tests into one-or-more Runs under one SuiteRun (see
@@ -177,11 +243,26 @@ export class ExecutionProcessor extends WorkerHost {
   private async maybeFinalizeSuiteRun(suiteRunId: string): Promise<void> {
     const runs = await this.prisma.run.findMany({ where: { suiteRunId } });
     if (runs.some((r) => r.status === 'QUEUED' || r.status === 'RUNNING')) return;
-    const allPassed = runs.every((r) => r.status === 'PASSED');
+    // SKIPPED (quarantined) tests don't count against the suite — that's the whole point of
+    // quarantining a flaky test rather than deleting it from the suite.
+    const allPassed = runs.every((r) => r.status === 'PASSED' || r.status === 'SKIPPED');
     await this.prisma.suiteRun.update({
       where: { id: suiteRunId },
       data: { status: allPassed ? 'PASSED' : 'FAILED', finishedAt: new Date() },
     });
+
+    if (!allPassed) {
+      const suiteRun = await this.prisma.suiteRun.findUnique({
+        where: { id: suiteRunId },
+        include: { suite: { include: { project: { select: { webhookUrl: true } } } } },
+      });
+      if (suiteRun?.suite.project.webhookUrl) {
+        await this.notifications.post(
+          suiteRun.suite.project.webhookUrl,
+          `❌ Suite "${suiteRun.suite.name}" failed. View it in Testora.`,
+        );
+      }
+    }
   }
 
   private async executeApiTest(
@@ -237,6 +318,11 @@ export class ExecutionProcessor extends WorkerHost {
     let steps = await flattenComponentSteps(this.prisma, (test.steps as RecordedStep[]) ?? []);
     steps = applyDataRow(steps, dataRow);
     steps = applyVariables(steps, envVars);
+    // applyVariables only touches step.value/step.selector — the test's own targetUrl
+    // (used below for the initial navigation when steps[0] isn't itself a goto) is a
+    // separate field and needs the same {{env.KEY}} substitution, or a test built to
+    // navigate to {{env.baseUrl}} would literally goto that unresolved literal string.
+    const targetUrl = substituteVariables(test.targetUrl, envVars);
 
     const runDir = join(EXEC_ROOT, runId);
     mkdirSync(runDir, { recursive: true });
@@ -250,7 +336,7 @@ export class ExecutionProcessor extends WorkerHost {
       locators.map((l) => ({ key: l.key, strategy: l.strategy, value: l.value, roleName: l.roleName })),
       healEventsPath,
       { viewportWidth: test.viewportWidth, viewportHeight: test.viewportHeight, userAgent: test.userAgent },
-      test.targetUrl,
+      targetUrl,
     );
     writeFileSync(specPath, spec, 'utf-8');
 

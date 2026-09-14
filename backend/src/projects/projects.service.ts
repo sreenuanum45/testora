@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateProjectDto } from './dto/project.dto';
+import { CreateProjectDto, UpdateProjectDto } from './dto/project.dto';
 
 @Injectable()
 export class ProjectsService {
@@ -24,5 +24,13 @@ export class ProjectsService {
     if (!project) throw new NotFoundException('Project not found');
     if (project.ownerId !== userId) throw new ForbiddenException('You do not have access to this project');
     return project;
+  }
+
+  async update(userId: string, projectId: string, dto: UpdateProjectDto) {
+    await this.findOneOwned(userId, projectId);
+    return this.prisma.project.update({
+      where: { id: projectId },
+      data: { webhookUrl: dto.webhookUrl === undefined ? undefined : dto.webhookUrl || null },
+    });
   }
 }

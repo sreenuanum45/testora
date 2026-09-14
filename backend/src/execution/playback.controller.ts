@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -73,6 +73,28 @@ export class RunScreenshotController {
   }
 }
 
+/** The pixelmatch diff image against the test's visual baseline — see
+ *  ExecutionProcessor.diffAgainstVisualBaseline. Only present once a baseline has been set
+ *  and a same-dimension screenshot has run since. */
+@UseGuards(JwtAuthGuard)
+@Controller('projects/:projectId/runs/:runId/visual-diff')
+export class RunVisualDiffController {
+  constructor(private readonly execution: ExecutionService) {}
+
+  @Get()
+  async stream(
+    @CurrentUser() user: JwtPayload,
+    @Param('projectId') projectId: string,
+    @Param('runId') runId: string,
+    @Res() res: Response,
+  ) {
+    const run = await this.execution.getRun(user.sub, projectId, runId);
+    if (!run.visualDiffPath || !existsSync(run.visualDiffPath)) throw new NotFoundException('No visual diff available for that run');
+    res.set('Content-Type', 'image/png');
+    res.sendFile(resolve(run.visualDiffPath));
+  }
+}
+
 /** Live (poll while RUNNING) and historical (after it finishes) step-by-step progress for
  *  one run, including self-healing kicking in mid-step — the "watch it execute" panel. */
 @UseGuards(JwtAuthGuard)
@@ -83,5 +105,58 @@ export class RunStepEventsController {
   @Get()
   list(@CurrentUser() user: JwtPayload, @Param('projectId') projectId: string, @Param('runId') runId: string) {
     return this.execution.listStepEvents(user.sub, projectId, runId);
+  }
+}
+
+/** On-demand AI explanation of a failed run — see ExecutionService.explainFailure. */
+@UseGuards(JwtAuthGuard)
+@Controller('projects/:projectId/runs/:runId/explain')
+export class RunExplainController {
+  constructor(private readonly execution: ExecutionService) {}
+
+  @Post()
+  explain(@CurrentUser() user: JwtPayload, @Param('projectId') projectId: string, @Param('runId') runId: string) {
+    return this.execution.explainFailure(user.sub, projectId, runId);
+  }
+}
+
+/** Project-wide self-healing analytics — see ExecutionService.getHealInsights. */
+@UseGuards(JwtAuthGuard)
+@Controller('projects/:projectId/heal-insights')
+export class HealInsightsController {
+  constructor(private readonly execution: ExecutionService) {}
+
+  @Get()
+  get(@CurrentUser() user: JwtPayload, @Param('projectId') projectId: string) {
+    return this.execution.getHealInsights(user.sub, projectId);
+  }
+}
+
+/** Step-by-step diff between two runs — see ExecutionService.compareRuns. */
+@UseGuards(JwtAuthGuard)
+@Controller('projects/:projectId/runs/compare')
+export class RunCompareController {
+  constructor(private readonly execution: ExecutionService) {}
+
+  @Get()
+  compare(
+    @CurrentUser() user: JwtPayload,
+    @Param('projectId') projectId: string,
+    @Query('a') runIdA: string,
+    @Query('b') runIdB: string,
+  ) {
+    return this.execution.compareRuns(user.sub, projectId, runIdA, runIdB);
+  }
+}
+
+/** On-demand AI weekly status digest — see ExecutionService.getWeeklyDigest. */
+@UseGuards(JwtAuthGuard)
+@Controller('projects/:projectId/digest')
+export class WeeklyDigestController {
+  constructor(private readonly execution: ExecutionService) {}
+
+  @Post()
+  get(@CurrentUser() user: JwtPayload, @Param('projectId') projectId: string) {
+    return this.execution.getWeeklyDigest(user.sub, projectId);
   }
 }

@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import { useAppStore } from '../store/appStore';
 import type { RunStatus, RunStepEvent, Step } from '../api/types';
 
-function describeStep(step: Step | undefined, index: number): string {
+export function describeStep(step: Step | undefined, index: number): string {
   if (!step) return `Step ${index + 1}`;
   const target = step.roleName || step.selector || '';
   switch (step.action) {
@@ -50,6 +50,8 @@ function describeStep(step: Step | undefined, index: number): string {
       return `Wait for the URL to contain "${step.value}"`;
     case 'waitForNetworkIdle':
       return `Wait for network idle`;
+    case 'waitForPopup':
+      return `Switch to the new tab/window that just opened`;
     case 'customCode':
       return `Run custom code`;
     case 'component':
@@ -130,7 +132,7 @@ export default function LiveStepLog({ runId, runStatus, steps, className }: Live
           <div key={event.id} className="flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-2 text-xs">
             <StatusIcon status={event.status} />
             <span className="text-muted shrink-0">{event.index + 1}.</span>
-            <span className={`flex-1 truncate ${event.status === 'failed' ? 'text-red-600' : 'text-ink'}`}>
+            <span className={`flex-1 min-w-0 truncate ${event.status === 'failed' ? 'text-red-600' : 'text-ink'}`}>
               {describeStep(steps[event.index], event.index)}
             </span>
             {event.status === 'failed' && event.message && <span className="text-red-500 truncate max-w-[40%]">{event.message}</span>}

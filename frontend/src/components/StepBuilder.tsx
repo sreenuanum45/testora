@@ -42,6 +42,7 @@ const ACTION_GROUPS: Array<{ label: string; actions: Array<{ value: StepAction; 
       { value: 'waitForUrl', label: 'Wait for URL to contain' },
       { value: 'waitForResponse', label: 'Wait for network response' },
       { value: 'waitForNetworkIdle', label: 'Wait for network idle' },
+      { value: 'waitForPopup', label: 'Wait for new tab/window to open' },
     ],
   },
   {

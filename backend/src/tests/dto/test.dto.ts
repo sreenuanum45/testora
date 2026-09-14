@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEnum, IsIn, IsInt, IsObject, IsOptional, IsString, Matches, Max, Min, MinLength, ValidateIf } from 'class-validator';
+import { IsArray, IsBoolean, IsEnum, IsIn, IsInt, IsObject, IsOptional, IsString, Matches, Max, Min, MinLength, ValidateIf } from 'class-validator';
 
 export enum TestTypeDto {
   WEB = 'WEB',
@@ -38,9 +38,15 @@ export class CreateTestDto {
 
   // Required when type includes a Web flow (WEB or the combined WEB_API). Matches the UI
   // tip: "Ensure the URL starts with 'http://' or 'https://'."
+  // Accepts a real http(s) URL, or a {{env.KEY}} placeholder that resolves to one at
+  // execution/export time (see ExecutionProcessor.executeWebTest / ExportController) — the
+  // literal-URL-only check would otherwise make it impossible to ever save a templated
+  // target URL, since there's no separate "update test" endpoint to set it after creation.
   @ValidateIf((o: CreateTestDto) => needsWebUrl(o.type))
   @IsString()
-  @Matches(/^https?:\/\//, { message: "Test URL must start with 'http://' or 'https://'" })
+  @Matches(/^(https?:\/\/|\{\{env\.\w+\}\})/, {
+    message: "Test URL must start with 'http://', 'https://', or a '{{env.KEY}}' placeholder",
+  })
   targetUrl?: string;
 
   @IsOptional()
@@ -99,10 +105,34 @@ export class CreateTestDto {
   @IsOptional()
   @IsString()
   userAgent?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
 }
 
 export class UpdateStepsDto {
   @IsObject({ each: true })
   @Type(() => Object)
   steps!: Array<Record<string, unknown>>;
+}
+
+// General test settings — tags and quarantine — edited from the test detail header rather
+// than the step builder, so this is deliberately separate from UpdateStepsDto.
+export class UpdateTestDto {
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  quarantined?: boolean;
+}
+
+export class SetVisualBaselineDto {
+  @IsString()
+  @MinLength(1)
+  runId!: string;
 }

@@ -14,13 +14,17 @@ export const healEvents: HealEventPayload[] = [];
  * The full Observe -> Diagnose -> Act -> Verify -> Persist loop:
  *  1. OBSERVE: the primary descriptor fails to resolve to a visible element.
  *  2. DIAGNOSE (cheap): heuristic candidates derived from the descriptor's own fields.
- *  3. DIAGNOSE (LLM): a DOM snapshot is sent to the Groq -> Gemini -> OpenRouter -> OpenAI
- *     fallback chain, which suggests a replacement descriptor.
+ *  3. DIAGNOSE (LLM): a DOM snapshot is sent to Groq and Gemini in parallel (first valid
+ *     response wins, falling back to OpenRouter -> OpenAI if both fail), which suggests a
+ *     replacement descriptor.
  *  4. VERIFY: the suggestion must resolve to a real visible element or it's rejected.
  *  5. ACT/PERSIST: the heal is recorded in `healEvents` for later database persistence.
  */
 export async function healingLocate(page: Page, descriptor: LocatorDescriptor): Promise<Locator> {
-  const direct = await resolveVisible(page, descriptor);
+  // The original locator gets a real grace window (matches typical real-world page-load
+  // variance) before being treated as broken — candidates probed below stay on the short
+  // default timeout since those are speculative guesses, not the expected-to-work path.
+  const direct = await resolveVisible(page, descriptor, 6000);
   if (direct) return direct;
 
   const heuristic = await attemptHeuristicRepair(page, descriptor);

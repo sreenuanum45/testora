@@ -32,7 +32,11 @@ export default function Topbar(): JSX.Element {
         data = [created];
       }
       setProjects(data);
-      if (!currentProjectId && data.length > 0) setCurrentProject(data[0].id);
+      // currentProjectId can be a stale id left over in localStorage (deleted project,
+      // or a different account on this browser) — fall back to the first real project
+      // rather than keep pointing at an id the backend will 404 on.
+      const stillValid = currentProjectId && data.some((p) => p.id === currentProjectId);
+      if (!stillValid && data.length > 0) setCurrentProject(data[0].id);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -46,7 +50,8 @@ export default function Topbar(): JSX.Element {
         data = [created];
       }
       setEnvironments(data);
-      if (!currentEnvironmentId && data.length > 0) setCurrentEnvironment(data[0].id);
+      const stillValid = currentEnvironmentId && data.some((e) => e.id === currentEnvironmentId);
+      if (!stillValid && data.length > 0) setCurrentEnvironment(data[0].id);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProjectId]);
@@ -93,9 +98,14 @@ export default function Topbar(): JSX.Element {
         <div className="relative w-full">
           <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
           <input
+            readOnly
             placeholder="Search tests, suites, components..."
-            className="w-full bg-surface border border-border rounded-xl pl-10 pr-3 py-2 text-sm text-ink placeholder:text-muted"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-command-palette'))}
+            className="w-full bg-surface border border-border rounded-xl pl-10 pr-16 py-2 text-sm text-ink placeholder:text-muted cursor-pointer"
           />
+          <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-muted border border-border rounded px-1.5 py-0.5 pointer-events-none">
+            Ctrl K
+          </kbd>
         </div>
       </div>
 

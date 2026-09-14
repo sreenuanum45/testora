@@ -30,3 +30,14 @@ export class NlpController {
     return this.nlp.generateSteps(user.sub, projectId, testId, dto.text, dto.mode ?? 'append');
   }
 }
+
+@UseGuards(JwtAuthGuard)
+@Controller('projects/:projectId/tests/:testId/suggest-assertions')
+export class AssertionCoachController {
+  constructor(private readonly nlp: NlpService) {}
+
+  @Post()
+  suggest(@CurrentUser() user: JwtPayload, @Param('projectId') projectId: string, @Param('testId') testId: string) {
+    return this.nlp.suggestAssertions(user.sub, projectId, testId);
+  }
+}

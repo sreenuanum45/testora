@@ -98,7 +98,11 @@ export class LlmProviderService {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: [{ parts: [{ text: userPrompt }] }],
-        generationConfig: { temperature: 0 },
+        // Newer Gemini flash aliases default to "thinking" on, which can burn the entire
+        // output budget on invisible reasoning and return zero content parts for prompts
+        // that need a short, strict answer. Disable it — we want the direct answer, not a
+        // chain of thought — and keep a token floor as a second line of defense.
+        generationConfig: { temperature: 0, maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } },
       }),
     });
     if (!res.ok) throw new Error(`Gemini API error ${res.status}: ${await res.text()}`);

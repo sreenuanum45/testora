@@ -25,6 +25,10 @@ export type StepAction =
   | 'waitForHidden'
   | 'waitForEnabled'
   | 'waitForNetworkIdle'
+  // A click/action that opens a new browser tab or window (target="_blank" links,
+  // window.open, etc.) — marks "the most recently opened tab is now the active page";
+  // every step after this one runs against that tab instead of the original.
+  | 'waitForPopup'
   // Escape hatches / composition
   | 'customCode'
   | 'component';
@@ -70,11 +74,37 @@ export function parseCodegenToSteps(code: string): RecordedStep[] {
   const steps: RecordedStep[] = [];
   const lines = code.split('\n');
 
+  // Codegen records a click/action that opens a new tab or window as THREE lines: a
+  // waitForEvent('popup') registered on some already-known page variable, the triggering
+  // action itself (against that SAME known variable), and finally awaiting the promise into
+  // a NEW page variable (page1, page2, ...) — every line after that targets the new
+  // variable instead of "page". Without tracking this, every action performed in a second
+  // tab is silently invisible: `await page1.click()` doesn't match `await page.`, so the
+  // original parser (which only ever recognized the literal "page" variable) dropped it.
+  const knownPageVars = new Set<string>(['page']);
+  let pendingPopupVar: string | null = null;
+
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed.startsWith('await page.')) continue;
 
-    const gotoMatch = trimmed.match(/page\.goto\(\s*['"`](.*?)['"`]\s*\)/);
+    const popupSetupMatch = trimmed.match(/^const (\w+)Promise\s*=\s*(\w+)\.waitForEvent\(\s*['"`](?:popup|page)['"`]\s*\)\s*;?$/);
+    if (popupSetupMatch && knownPageVars.has(popupSetupMatch[2]!)) {
+      pendingPopupVar = popupSetupMatch[1]!;
+      continue;
+    }
+
+    const popupResolveMatch = trimmed.match(/^const (\w+)\s*=\s*await \1Promise\s*;?$/);
+    if (popupResolveMatch && popupResolveMatch[1] === pendingPopupVar) {
+      knownPageVars.add(popupResolveMatch[1]!);
+      steps.push({ action: 'waitForPopup' });
+      pendingPopupVar = null;
+      continue;
+    }
+
+    const pageVarMatch = trimmed.match(/^await (\w+)\./);
+    if (!pageVarMatch || !knownPageVars.has(pageVarMatch[1]!)) continue;
+
+    const gotoMatch = trimmed.match(/\.goto\(\s*['"`](.*?)['"`]\s*\)/);
     if (gotoMatch) {
       steps.push({ action: 'goto', value: gotoMatch[1] });
       continue;

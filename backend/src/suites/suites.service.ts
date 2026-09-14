@@ -48,6 +48,21 @@ export class SuitesService {
     const suiteRun = await this.prisma.suiteRun.create({ data: { suiteId, status: 'RUNNING' } });
 
     for (const link of suite.tests) {
+      // Quarantined (auto-flagged flaky) tests don't get run as part of a suite/scheduled
+      // batch — they're recorded as SKIPPED so they still show up in the suite report,
+      // rather than silently vanishing. They can still be run individually from their own
+      // test page, which bypasses this check entirely.
+      if (link.test.quarantined) {
+        await this.prisma.run.create({
+          data: {
+            testId: link.testId,
+            suiteRunId: suiteRun.id,
+            status: 'SKIPPED',
+            errorMessage: 'Skipped — test is quarantined (flaky)',
+          },
+        });
+        continue;
+      }
       // A data-driven test fans out into multiple runs (one per data row) — link all of
       // them to this SuiteRun, not just the first.
       const runs = await this.execution.enqueueRun(userId, projectId, link.testId);

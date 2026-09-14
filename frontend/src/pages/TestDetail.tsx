@@ -12,19 +12,30 @@ import {
   Camera,
   Monitor,
   Activity,
+  Plus,
+  Loader2,
+  Lightbulb,
+  ShieldAlert,
+  ShieldOff,
+  ImageIcon,
 } from "lucide-react";
 import { api } from "../api/client";
 import { useAppStore } from "../store/appStore";
 import type {
+  AssertionSuggestion,
   DataSet,
   Environment,
   Locator,
   Run,
+  RunCompareResult,
   Step,
   Test,
 } from "../api/types";
+import RunCompareModal from "../components/RunCompareModal";
 import StepBuilder from "../components/StepBuilder";
 import RunProgressPanel from "../components/RunProgressPanel";
+import TagInput from "../components/TagInput";
+import VisualDiffModal from "../components/VisualDiffModal";
 
 const STRATEGY_OPTIONS = [
   "TESTID",
@@ -57,6 +68,14 @@ export default function TestDetail(): JSX.Element {
   const [nlpMode, setNlpMode] = useState<"append" | "replace">("append");
   const [nlpBusy, setNlpBusy] = useState(false);
 
+  const [assertionSuggestions, setAssertionSuggestions] = useState<
+    AssertionSuggestion[]
+  >([]);
+  const [assertionBusy, setAssertionBusy] = useState(false);
+  const [assertionProvider, setAssertionProvider] = useState<string | null>(
+    null,
+  );
+
   const [editingLocatorKey, setEditingLocatorKey] = useState<string | null>(
     null,
   );
@@ -76,6 +95,16 @@ export default function TestDetail(): JSX.Element {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [headed, setHeaded] = useState(false);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [compareSelection, setCompareSelection] = useState<string[]>([]);
+  const [compareResult, setCompareResult] = useState<RunCompareResult | null>(
+    null,
+  );
+  const [compareBusy, setCompareBusy] = useState(false);
+
+  const [editingTags, setEditingTags] = useState(false);
+  const [tagDraft, setTagDraft] = useState<string[]>([]);
+  const [quarantineBusy, setQuarantineBusy] = useState(false);
+  const [visualDiffRun, setVisualDiffRun] = useState<Run | null>(null);
 
   const loadTest = (): void => {
     if (!projectId || !testId) return;
@@ -116,7 +145,12 @@ export default function TestDetail(): JSX.Element {
         .then((s) => {
           setElapsedMs(s.elapsedMs ?? 0);
           if (!s.recording) {
+            // The recorder window can be closed directly rather than via the "Stop
+            // Recording" button — the backend still saves whatever was captured either
+            // way (see RecordingService), so this path needs the same refresh + feedback
+            // as the explicit stop button, not just a silent state flip.
             setRecording(false);
+            setMessage('Recording window closed — checking what was captured…');
             loadTest();
           }
         });
@@ -127,9 +161,25 @@ export default function TestDetail(): JSX.Element {
 
   const stopRecording = async (): Promise<void> => {
     if (!projectId || !testId) return;
-    await api.post(`/projects/${projectId}/tests/${testId}/recording/stop`);
-    setRecording(false);
-    loadTest();
+    try {
+      const result = await api.post<{ stopped: boolean; steps?: unknown[] }>(
+        `/projects/${projectId}/tests/${testId}/recording/stop`,
+      );
+      setMessage(
+        result.steps && result.steps.length > 0
+          ? `Recording saved — ${result.steps.length} step(s) captured.`
+          : 'Recording stopped, but no actions were captured. Make sure you clicked/typed in the browser window that opened before stopping.',
+      );
+    } catch (err) {
+      // Don't leave the UI stuck showing "Recording in progress" just because the stop
+      // call itself failed (e.g. the window was already closed) — whatever WAS captured
+      // is handled server-side regardless of how the recorder process ended, so still
+      // refresh below.
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRecording(false);
+      loadTest();
+    }
   };
 
   const needsWeb = test?.type === "WEB" || test?.type === "WEB_API";
@@ -197,6 +247,37 @@ export default function TestDetail(): JSX.Element {
     setDraftSteps(test?.steps ?? []);
   };
 
+  const toggleQuarantine = async (): Promise<void> => {
+    if (!projectId || !testId || !test) return;
+    setQuarantineBusy(true);
+    try {
+      const updated = await api.put<Test>(`/projects/${projectId}/tests/${testId}`, {
+        quarantined: !test.quarantined,
+      });
+      setTest(updated);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuarantineBusy(false);
+    }
+  };
+
+  const startEditTags = (): void => {
+    setTagDraft(test?.tags ?? []);
+    setEditingTags(true);
+  };
+
+  const saveTags = async (): Promise<void> => {
+    if (!projectId || !testId) return;
+    try {
+      const updated = await api.put<Test>(`/projects/${projectId}/tests/${testId}`, { tags: tagDraft });
+      setTest(updated);
+      setEditingTags(false);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const generateNlpSteps = async (): Promise<void> => {
     if (!projectId || !testId || !nlpText.trim()) return;
     setNlpBusy(true);
@@ -226,6 +307,74 @@ export default function TestDetail(): JSX.Element {
       setMessage(err instanceof Error ? err.message : String(err));
     } finally {
       setNlpBusy(false);
+    }
+  };
+
+  const suggestAssertions = async (): Promise<void> => {
+    if (!projectId || !testId) return;
+    setAssertionBusy(true);
+    setMessage(null);
+    try {
+      const result = await api.post<{
+        suggestions: AssertionSuggestion[];
+        provider: string | null;
+      }>(`/projects/${projectId}/tests/${testId}/suggest-assertions`);
+      setAssertionSuggestions(result.suggestions);
+      setAssertionProvider(result.provider);
+      if (result.suggestions.length === 0) {
+        setMessage("Every action already looks verified — no gaps found.");
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAssertionBusy(false);
+    }
+  };
+
+  // Inserting one suggestion shifts every step after it down by one — the remaining
+  // suggestions' own afterIndex values (captured against the ORIGINAL step list) have to
+  // shift with them, or a second insert lands one step too early.
+  const insertAssertion = (target: AssertionSuggestion): void => {
+    const insertAt = target.afterIndex + 1;
+    setDraftSteps((prev) => [
+      ...prev.slice(0, insertAt),
+      target.step,
+      ...prev.slice(insertAt),
+    ]);
+    setAssertionSuggestions((prev) =>
+      prev
+        .filter((s) => s !== target)
+        .map((s) =>
+          s.afterIndex >= insertAt ? { ...s, afterIndex: s.afterIndex + 1 } : s,
+        ),
+    );
+  };
+
+  const dismissAssertion = (target: AssertionSuggestion): void => {
+    setAssertionSuggestions((prev) => prev.filter((s) => s !== target));
+  };
+
+  const toggleCompareSelect = (runId: string): void => {
+    setCompareSelection((prev) => {
+      if (prev.includes(runId)) return prev.filter((id) => id !== runId);
+      if (prev.length >= 2) return prev; // only ever comparing two at a time
+      return [...prev, runId];
+    });
+  };
+
+  const runCompare = async (): Promise<void> => {
+    if (!projectId || compareSelection.length !== 2) return;
+    setCompareBusy(true);
+    try {
+      const [a, b] = compareSelection;
+      const result = await api.get<RunCompareResult>(
+        `/projects/${projectId}/runs/compare?a=${a}&b=${b}`,
+      );
+      setCompareResult(result);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCompareBusy(false);
     }
   };
 
@@ -337,9 +486,48 @@ export default function TestDetail(): JSX.Element {
                   {test.viewportWidth}×{test.viewportHeight}
                 </span>
               )}
+              {test.quarantined && (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-amber-50 text-amber-600 border border-amber-200">
+                  <ShieldAlert size={11} />
+                  Quarantined — skipped in suite runs
+                </span>
+              )}
+              {!editingTags &&
+                test.tags.map((tag) => (
+                  <span key={tag} className="px-2 py-0.5 rounded-full text-xs bg-brand-50 text-brand-600 border border-brand-100">
+                    {tag}
+                  </span>
+                ))}
+              {!editingTags && (
+                <button onClick={startEditTags} className="px-2 py-0.5 rounded-full text-xs border border-dashed border-border text-muted hover:text-ink">
+                  + Edit tags
+                </button>
+              )}
             </div>
+            {editingTags && (
+              <div className="flex items-center gap-2 mt-2 max-w-md">
+                <TagInput value={tagDraft} onChange={setTagDraft} />
+                <button onClick={saveTags} className="text-xs font-medium text-brand-600 shrink-0">
+                  Save
+                </button>
+                <button onClick={() => setEditingTags(false)} className="text-xs text-muted shrink-0">
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium shadow-card disabled:opacity-50 ${
+                test.quarantined ? "bg-amber-500 border-amber-500 text-white" : "bg-panel border-border text-ink"
+              }`}
+              onClick={toggleQuarantine}
+              disabled={quarantineBusy}
+              title={test.quarantined ? "Un-quarantine — include this test in suite runs again" : "Quarantine — skip this test in suite runs"}
+            >
+              {test.quarantined ? <ShieldOff size={13} /> : <ShieldAlert size={13} />}
+              {test.quarantined ? "Un-quarantine" : "Quarantine"}
+            </button>
             {needsWeb && (
               <label
                 className="flex items-center gap-1.5 text-xs text-muted mr-1"
@@ -361,16 +549,13 @@ export default function TestDetail(): JSX.Element {
               Export as Playwright Code
             </button>
             {needsWeb && (
-              <select
-                className="bg-panel border border-border rounded-lg px-3 py-2 text-sm shadow-card"
-                onChange={(e) => e.target.value && runTest(e.target.value)}
-                value=""
+              <button
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-brand-500 to-brand-400 text-white text-sm font-semibold shadow-card"
+                onClick={() => runTest()}
               >
-                <option value="">Run on...</option>
-                <option value="chromium">Chromium</option>
-                <option value="firefox">Firefox</option>
-                <option value="webkit">WebKit</option>
-              </select>
+                <Play size={14} />
+                Run
+              </button>
             )}
             {needsApi && !needsWeb && (
               <button
@@ -475,6 +660,76 @@ export default function TestDetail(): JSX.Element {
           <StepBuilder steps={draftSteps} onChange={setDraftSteps} />
         </div>
 
+        <div className="bg-panel border border-border rounded-2xl shadow-card p-6">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-ink flex items-center gap-1.5">
+                <Lightbulb size={14} className="text-amber-500" />
+                AI Assertion Coach
+              </h2>
+              <p className="text-xs text-muted mt-0.5">
+                Flags actions with no follow-up check — a click or fill that
+                could silently do nothing and the test would still pass.
+              </p>
+            </div>
+            <button
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface border border-border text-xs font-medium text-ink disabled:opacity-50"
+              onClick={suggestAssertions}
+              disabled={assertionBusy || draftSteps.length === 0}
+            >
+              {assertionBusy ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <Sparkles size={13} className="text-brand-500" />
+              )}
+              {assertionBusy ? "Reviewing…" : "Review test"}
+            </button>
+          </div>
+
+          {assertionSuggestions.length > 0 && (
+            <div className="space-y-2">
+              {assertionSuggestions.map((s) => (
+                <div
+                  key={`${s.afterIndex}-${s.step.action}-${s.step.roleName ?? s.step.selector ?? ""}`}
+                  className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-amber-800">{s.reason}</p>
+                    <code className="block mt-1 text-[11px] text-amber-700 truncate">
+                      + {s.step.action}
+                      {s.step.selectorStrategy
+                        ? ` ${s.step.selectorStrategy}="${s.step.selector ?? ""}"`
+                        : ""}
+                      {s.step.roleName ? ` name="${s.step.roleName}"` : ""}
+                      {s.step.value ? ` = "${s.step.value}"` : ""}
+                      {" "}
+                      (after step {s.afterIndex + 1})
+                    </code>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium"
+                      onClick={() => insertAssertion(s)}
+                    >
+                      <Plus size={12} />
+                      Insert
+                    </button>
+                    <button
+                      className="w-7 h-7 rounded-lg border border-amber-300 text-amber-700 flex items-center justify-center"
+                      onClick={() => dismissAssertion(s)}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {assertionProvider && (
+                <p className="text-[10px] text-muted">via {assertionProvider}</p>
+              )}
+            </div>
+          )}
+        </div>
+
         {test.locators && test.locators.length > 0 && (
           <div className="bg-panel border border-border rounded-2xl shadow-card p-6">
             <h2 className="text-sm font-semibold text-ink mb-3">
@@ -577,7 +832,32 @@ export default function TestDetail(): JSX.Element {
         )}
 
         <div className="bg-panel border border-border rounded-2xl shadow-card p-6">
-          <h2 className="text-sm font-semibold text-ink mb-3">Runs</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-ink">Runs</h2>
+            {compareSelection.length > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted">
+                  {compareSelection.length}/2 selected to compare
+                </span>
+                <button
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 text-white text-xs font-medium disabled:opacity-40"
+                  disabled={compareSelection.length !== 2 || compareBusy}
+                  onClick={runCompare}
+                >
+                  {compareBusy ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : null}
+                  Compare
+                </button>
+                <button
+                  className="text-xs text-muted"
+                  onClick={() => setCompareSelection([])}
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+          </div>
           {runs.length === 0 ? (
             <p className="text-sm text-muted">No runs yet.</p>
           ) : (
@@ -585,12 +865,14 @@ export default function TestDetail(): JSX.Element {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-xs text-muted border-b border-border">
+                    <th className="py-2 w-8"></th>
                     <th className="py-2">Started</th>
                     <th className="py-2">Browser</th>
                     <th className="py-2">Data row</th>
                     <th className="py-2">Status</th>
                     <th className="py-2">Duration</th>
                     <th className="py-2">Heals</th>
+                    <th className="py-2">Visual</th>
                     <th className="py-2">Playback</th>
                   </tr>
                 </thead>
@@ -601,6 +883,18 @@ export default function TestDetail(): JSX.Element {
                       className="border-b border-border last:border-0 cursor-pointer hover:bg-surface"
                       onClick={() => setExpandedRunId(r.id)}
                     >
+                      <td className="py-2" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          className="rounded"
+                          checked={compareSelection.includes(r.id)}
+                          disabled={
+                            !compareSelection.includes(r.id) &&
+                            compareSelection.length >= 2
+                          }
+                          onChange={() => toggleCompareSelect(r.id)}
+                        />
+                      </td>
                       <td className="py-2 flex items-center gap-1.5">
                         <Activity size={13} className="text-brand-500" />
                         {new Date(r.startedAt).toLocaleString()}
@@ -626,6 +920,26 @@ export default function TestDetail(): JSX.Element {
                           </span>
                         ) : (
                           "—"
+                        )}
+                      </td>
+                      <td className="py-2" onClick={(e) => e.stopPropagation()}>
+                        {r.screenshotPath || test.visualBaselinePath ? (
+                          <button
+                            className="flex items-center gap-1 text-xs"
+                            onClick={() => setVisualDiffRun(r)}
+                            title="View visual regression diff"
+                          >
+                            <ImageIcon size={12} className="text-brand-500" />
+                            {r.visualDiffPercent !== null ? (
+                              <span className={visualDiffClass(r.visualDiffPercent)}>{r.visualDiffPercent.toFixed(1)}%</span>
+                            ) : test.visualBaselinePath ? (
+                              <span className="text-muted">n/a</span>
+                            ) : (
+                              <span className="text-muted">Set baseline</span>
+                            )}
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted">—</span>
                         )}
                       </td>
                       <td className="py-2" onClick={(e) => e.stopPropagation()}>
@@ -669,6 +983,32 @@ export default function TestDetail(): JSX.Element {
             </div>
           )}
         </div>
+
+        {visualDiffRun && projectId && testId && (
+          <VisualDiffModal
+            projectId={projectId}
+            testId={testId}
+            run={visualDiffRun}
+            hasBaseline={!!test.visualBaselinePath}
+            onClose={() => setVisualDiffRun(null)}
+            onBaselineSet={() => {
+              setVisualDiffRun(null);
+              loadTest();
+              loadRuns();
+            }}
+          />
+        )}
+
+        {compareResult && (
+          <RunCompareModal
+            result={compareResult}
+            steps={test.steps ?? []}
+            onClose={() => {
+              setCompareResult(null);
+              setCompareSelection([]);
+            }}
+          />
+        )}
 
         {videoRunId && videoUrl && (
           <div
@@ -730,10 +1070,12 @@ export default function TestDetail(): JSX.Element {
           if (!activeRun) return null;
           return (
             <RunProgressPanel
+              key={activeRun.id}
               runId={activeRun.id}
               runStatus={activeRun.status}
               steps={test.steps ?? []}
               testName={test.name}
+              errorMessage={activeRun.errorMessage}
               onClose={() => setExpandedRunId(null)}
             />
           );
@@ -742,12 +1084,19 @@ export default function TestDetail(): JSX.Element {
   );
 }
 
+function visualDiffClass(percent: number): string {
+  if (percent < 1) return "text-emerald-600";
+  if (percent <= 5) return "text-amber-600 font-medium";
+  return "text-red-600 font-medium";
+}
+
 function StatusBadge({ status }: { status: string }): JSX.Element {
   const colors: Record<string, string> = {
     PASSED: "bg-emerald-50 text-emerald-600",
     FAILED: "bg-red-50 text-red-600",
     RUNNING: "bg-amber-50 text-amber-600",
     QUEUED: "bg-slate-100 text-slate-600",
+    SKIPPED: "bg-slate-100 text-slate-500",
   };
   return (
     <span

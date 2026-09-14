@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Topbar from './Topbar';
+import CommandPalette from '../components/CommandPalette';
 
 export default function AppLayout(): JSX.Element {
   return (
@@ -12,6 +13,7 @@ export default function AppLayout(): JSX.Element {
           <Outlet />
         </main>
       </div>
+      <CommandPalette />
     </div>
   );
 }

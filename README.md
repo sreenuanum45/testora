@@ -22,8 +22,9 @@ concept, not a finished commercial product. Being upfront about the boundary:
 - Self-healing: heuristic repair first (free), then an LLM (Groq → Gemini → OpenRouter →
   OpenAI fallback chain) diagnoses the live DOM and suggests a replacement locator — healed
   locators persist to the database so the *next* run starts from the fix, not the break
-- Cross-browser execution (Chromium/Firefox/WebKit) via a BullMQ queue + worker, with
-  trace+video always captured
+- Execution on Chromium via a BullMQ queue + worker, with trace+video captured on failing
+  runs (screenshot captured on every run, for visual-diffing) — kept to one browser engine
+  to keep the deployed image lightweight (~300MB vs. ~2.4GB for all three)
 - "Export as Playwright Code" — turns the stored step-list into real, runnable
   `page.locator()`/`expect()` TypeScript
 - Suites (group tests, batch run) and Schedulers (cron via BullMQ repeatable jobs)
@@ -96,7 +97,7 @@ createdb testora   # or: psql -c "CREATE DATABASE testora"
 cd backend
 cp .env.example .env   # fill in DATABASE_URL, REDIS_HOST/PORT, at least one LLM key
 npm install
-npx playwright install chromium firefox webkit
+npx playwright install chromium
 npx prisma migrate dev
 npm run start:dev      # http://localhost:4100/api (see PORT in .env)
 
@@ -113,8 +114,8 @@ cp .env.example .env    # fill in secrets
 docker compose up --build
 ```
 
-This starts Postgres, Redis, the backend (on the Playwright base image — Chromium/Firefox/
-WebKit and all OS dependencies pre-installed), and the frontend (built + served via nginx).
+This starts Postgres, Redis, the backend (Chromium + its OS dependencies installed on a
+slim Node image), and the frontend (built + served via nginx).
 
 - Frontend: http://localhost:5175
 - Backend API: http://localhost:4000/api

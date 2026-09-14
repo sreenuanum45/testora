@@ -10,17 +10,23 @@ export async function attemptHeuristicRepair(
   page: Page,
   original: LocatorDescriptor,
 ): Promise<{ descriptor: LocatorDescriptor; locator: Locator } | null> {
-  const seed = original.roleName ?? original.value;
   const candidates: LocatorDescriptor[] = [];
 
   if (original.strategy === 'role' && original.roleName) {
     candidates.push({ key: original.key, strategy: 'role', value: original.value, roleName: original.roleName });
   }
-  candidates.push(
-    { key: original.key, strategy: 'label', value: seed },
-    { key: original.key, strategy: 'placeholder', value: seed },
-    { key: original.key, strategy: 'text', value: seed },
-  );
+  // For a role descriptor with no accessible name, `value` is just the role KEYWORD
+  // ("link", "button", ...) — never a real label/placeholder/text on the page, so probing
+  // those would only waste time on guaranteed misses. Every other strategy's `value` (or a
+  // role's roleName) is at least plausible page content, worth trying as a seed.
+  const seed = original.roleName ?? (original.strategy === 'role' ? null : original.value);
+  if (seed) {
+    candidates.push(
+      { key: original.key, strategy: 'label', value: seed },
+      { key: original.key, strategy: 'placeholder', value: seed },
+      { key: original.key, strategy: 'text', value: seed },
+    );
+  }
   if (original.strategy === 'testid') {
     const kebab = original.value.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
     const camel = original.value.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());

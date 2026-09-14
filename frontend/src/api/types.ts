@@ -8,6 +8,7 @@ export interface Project {
   id: string;
   name: string;
   createdAt: string;
+  webhookUrl: string | null;
 }
 
 export interface Variable {
@@ -58,6 +59,7 @@ export type StepAction =
   | 'waitForHidden'
   | 'waitForEnabled'
   | 'waitForNetworkIdle'
+  | 'waitForPopup'
   | 'customCode'
   | 'component';
 
@@ -91,6 +93,10 @@ export interface Test {
   viewportWidth: number | null;
   viewportHeight: number | null;
   userAgent: string | null;
+  tags: string[];
+  quarantined: boolean;
+  quarantinedAt: string | null;
+  visualBaselinePath: string | null;
   createdAt: string;
   locators?: Locator[];
 }
@@ -153,6 +159,8 @@ export interface Run {
   dataRow: Record<string, unknown> | null;
   screenshotPath: string | null;
   headed: boolean;
+  visualDiffPercent: number | null;
+  visualDiffPath: string | null;
   healEvents: HealEvent[];
 }
 
@@ -206,4 +214,68 @@ export type FakerColumnType =
 export interface FakerColumn {
   name: string;
   type: FakerColumnType;
+}
+
+export type TestHealthClassification = 'NEW' | 'STABLE' | 'FLAKY' | 'BROKEN';
+
+export interface TestHealth {
+  testId: string;
+  classification: TestHealthClassification;
+  recentRuns: RunStatus[]; // oldest -> newest
+  lastRunAt: string | null;
+}
+
+export interface HealInsights {
+  totalHeals: number;
+  byMethod: Record<string, number>;
+  byProvider: Record<string, number>;
+  topLocators: Array<{ testId: string; testName: string; locatorKey: string; count: number; lastHealedAt: string }>;
+  recent: Array<{
+    id: string;
+    testId: string;
+    testName: string;
+    locatorKey: string;
+    method: 'HEURISTIC' | 'LLM';
+    provider: string | null;
+    oldValue: string;
+    newValue: string;
+    createdAt: string;
+  }>;
+}
+
+export interface FailureExplanation {
+  summary: string;
+  provider: string;
+  model: string;
+}
+
+export interface AssertionSuggestion {
+  afterIndex: number;
+  reason: string;
+  step: Step;
+}
+
+export interface WeeklyDigest {
+  digest: string;
+  provider: string | null;
+  model: string | null;
+  summary: {
+    period: string;
+    totalRuns: number;
+    passRateThisWeek: number | null;
+    passRateLastWeek: number | null;
+    brokenTests: string[];
+    flakyTests: string[];
+    locatorsHealedThisWeek: number;
+  };
+}
+
+export interface RunCompareResult {
+  runA: { id: string; status: RunStatus; startedAt: string; durationMs: number | null; browser: string; errorMessage: string | null };
+  runB: { id: string; status: RunStatus; startedAt: string; durationMs: number | null; browser: string; errorMessage: string | null };
+  durationDeltaMs: number;
+  statusChanged: boolean;
+  stepDiff: Array<{ index: number; statusA: string | null; statusB: string | null; changed: boolean }>;
+  healsOnlyInA: HealEvent[];
+  healsOnlyInB: HealEvent[];
 }

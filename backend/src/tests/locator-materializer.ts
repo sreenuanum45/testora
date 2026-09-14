@@ -27,9 +27,12 @@ const STRATEGY_MAP: Record<string, 'TESTID' | 'ROLE' | 'LABEL' | 'PLACEHOLDER' |
  * possibly-healed locator is left alone.
  */
 export async function materializeLocators(prisma: PrismaClient, testId: string, steps: RecordedStep[]): Promise<void> {
+  const currentKeys = new Set<string>();
+
   for (const [index, step] of steps.entries()) {
     if (!step.selector || !step.selectorStrategy) continue;
     const key = `step-${index}`;
+    currentKeys.add(key);
     const strategy = STRATEGY_MAP[step.selectorStrategy];
     const value = step.selector;
     const roleName = step.roleName ?? null;
@@ -52,4 +55,13 @@ export async function materializeLocators(prisma: PrismaClient, testId: string, 
       data: { strategy, value, roleName, sourceStrategy: strategy, sourceValue: value, sourceRoleName: roleName },
     });
   }
+
+  // A re-record or a manual step deletion can shrink the step list — without this, a
+  // Locator row from a step index that no longer exists lingers forever (confirmed in
+  // production data: a 7-step test with "step-7"/"step-8" Locator rows left behind from
+  // before an edit), cluttering the Locators panel with entries for steps that aren't
+  // there anymore.
+  await prisma.locator.deleteMany({
+    where: { testId, key: { notIn: [...currentKeys] } },
+  });
 }
