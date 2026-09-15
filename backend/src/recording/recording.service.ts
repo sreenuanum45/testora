@@ -4,10 +4,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaService } from '../prisma/prisma.service';
 import { TestsService } from '../tests/tests.service';
+import { LlmProviderService } from '../llm/llm-provider.service';
 import { materializeLocators } from '../tests/locator-materializer';
 import { parseCodegenToSteps, type RecordedStep } from './step-parser';
+import { HyperbrowserRecording } from './hyperbrowser-recorder';
 
-interface RecordingSession {
+interface LocalRecordingSession {
+  mode: 'local';
   process: ChildProcessWithoutNullStreams;
   outputFile: string;
   startedAt: number;
@@ -18,23 +21,50 @@ interface RecordingSession {
   result: Promise<RecordedStep[]>;
 }
 
+interface HyperbrowserRecordingSession {
+  mode: 'hyperbrowser';
+  recording: HyperbrowserRecording;
+  liveUrl: string;
+  startedAt: number;
+}
+
+type RecordingSession = LocalRecordingSession | HyperbrowserRecordingSession;
+
 const RECORDINGS_DIR = join(process.cwd(), 'tmp', 'recordings');
 
 @Injectable()
 export class RecordingService {
+  // One recording at a time, system-wide — Hyperbrowser's free tier itself is capped at
+  // one concurrent browser, and there's no real need for more on a single small deployment.
   private sessions = new Map<string, RecordingSession>();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly tests: TestsService,
+    private readonly llm: LlmProviderService,
   ) {}
 
-  async start(userId: string, projectId: string, testId: string): Promise<{ started: boolean }> {
-    if (this.sessions.has(testId)) {
-      throw new Error('A recording is already in progress for this test');
+  async start(userId: string, projectId: string, testId: string): Promise<{ started: boolean; liveUrl?: string }> {
+    if (this.sessions.size > 0) {
+      throw new Error(
+        this.sessions.has(testId)
+          ? 'A recording is already in progress for this test'
+          : 'A recording is already in progress for another test — only one at a time is supported',
+      );
     }
     const test = await this.tests.findOne(userId, projectId, testId);
     if (!test.targetUrl) throw new Error('Test has no target URL to record against');
+
+    // HYPERBROWSER_API_KEY is only ever set in a deployed environment (see Render env
+    // vars) — local dev keeps using Codegen directly against a real local display, exactly
+    // as before. This isn't a platform sniff like the reverted Xvfb attempt was: it's an
+    // explicit opt-in, so there's no risk of local dev silently changing behavior.
+    if (process.env.HYPERBROWSER_API_KEY) {
+      const recording = new HyperbrowserRecording();
+      const { liveUrl } = await recording.start(test.targetUrl);
+      this.sessions.set(testId, { mode: 'hyperbrowser', recording, liveUrl, startedAt: Date.now() });
+      return { started: true, liveUrl };
+    }
 
     if (!existsSync(RECORDINGS_DIR)) mkdirSync(RECORDINGS_DIR, { recursive: true });
     const outputFile = join(RECORDINGS_DIR, `${testId}.spec.ts`);
@@ -55,7 +85,7 @@ export class RecordingService {
       resolveResult = resolve;
     });
 
-    const session: RecordingSession = { process: child, outputFile, startedAt: Date.now(), result };
+    const session: LocalRecordingSession = { mode: 'local', process: child, outputFile, startedAt: Date.now(), result };
     this.sessions.set(testId, session);
 
     // The recorder's browser window can close for reasons OTHER than the user clicking
@@ -69,7 +99,7 @@ export class RecordingService {
       void (async () => {
         // Give the file system a brief moment to flush codegen's final write.
         await new Promise((r) => setTimeout(r, 500));
-        const steps = await this.persistRecording(testId, outputFile);
+        const steps = await this.persistFromFile(testId, outputFile);
         // Only remove the session once persistence is actually done — status() staying
         // "recording: true" a little longer than the real browser window is alive is far
         // better than the frontend's poll seeing "not recording" and reloading the test
@@ -88,13 +118,21 @@ export class RecordingService {
       // No tracked session — most likely the backend restarted mid-recording and lost its
       // in-memory state. Best-effort recovery: if Codegen's output file is still on disk,
       // whatever was captured before the orphaning is still worth saving rather than
-      // silently discarding it.
+      // silently discarding it. (Only applies to the local Codegen path — a Hyperbrowser
+      // session lost this way is simply gone, and will auto-expire on its own timeout.)
       const outputFile = join(RECORDINGS_DIR, `${testId}.spec.ts`);
       if (existsSync(outputFile)) {
-        const steps = await this.persistRecording(testId, outputFile);
+        const steps = await this.persistFromFile(testId, outputFile);
         return { stopped: true, steps };
       }
       throw new NotFoundException('No recording in progress for this test');
+    }
+
+    if (session.mode === 'hyperbrowser') {
+      const steps = await session.recording.stop(this.llm);
+      await this.persistSteps(testId, steps);
+      this.sessions.delete(testId);
+      return { stopped: true, steps };
     }
 
     try {
@@ -111,20 +149,27 @@ export class RecordingService {
     return { stopped: true, steps };
   }
 
-  status(testId: string): { recording: boolean; elapsedMs: number | null } {
+  status(testId: string): { recording: boolean; elapsedMs: number | null; liveUrl?: string } {
     const session = this.sessions.get(testId);
-    return { recording: !!session, elapsedMs: session ? Date.now() - session.startedAt : null };
+    return {
+      recording: !!session,
+      elapsedMs: session ? Date.now() - session.startedAt : null,
+      liveUrl: session?.mode === 'hyperbrowser' ? session.liveUrl : undefined,
+    };
   }
 
-  private async persistRecording(testId: string, outputFile: string): Promise<RecordedStep[]> {
+  private async persistFromFile(testId: string, outputFile: string): Promise<RecordedStep[]> {
     if (!existsSync(outputFile)) return [];
     const raw = redactPasswords(readFileSync(outputFile, 'utf-8'));
     const steps = parseCodegenToSteps(raw);
     rmSync(outputFile, { force: true });
+    await this.persistSteps(testId, steps);
+    return steps;
+  }
 
+  private async persistSteps(testId: string, steps: RecordedStep[]): Promise<void> {
     await this.prisma.test.update({ where: { id: testId }, data: { steps: steps as object[] } });
     await materializeLocators(this.prisma, testId, steps);
-    return steps;
   }
 }
 
