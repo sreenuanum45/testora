@@ -9,9 +9,6 @@ import { parseCodegenToSteps, type RecordedStep } from './step-parser';
 
 interface RecordingSession {
   process: ChildProcessWithoutNullStreams;
-  /** Xvfb + x11vnc, only set when running headless-server-side (see needsVirtualDisplay
-   *  below) — undefined on a local dev machine that already has a real display. */
-  virtualDisplay?: { xvfb: ChildProcessWithoutNullStreams; x11vnc: ChildProcessWithoutNullStreams };
   outputFile: string;
   startedAt: number;
   /** Resolves once the process has actually exited AND whatever it captured has been
@@ -23,21 +20,8 @@ interface RecordingSession {
 
 const RECORDINGS_DIR = join(process.cwd(), 'tmp', 'recordings');
 
-// A server with no physical/virtual display of its own (Render, any headless Linux host)
-// can't open a real Codegen browser window — Xvfb gives it one to render into, and
-// vnc-relay.ts streams that virtual screen to whichever browser tab started the recording.
-// A local dev machine (Windows/Mac, or a Linux desktop with $DISPLAY already set) has a
-// real display already, so Codegen's window "just works" there exactly as before — no
-// virtual display needed, and Xvfb/x11vnc likely aren't even installed there.
-const NEEDS_VIRTUAL_DISPLAY = process.platform === 'linux' && !process.env.DISPLAY;
-export const VNC_DISPLAY = ':99';
-export const VNC_PORT = 5901;
-
 @Injectable()
 export class RecordingService {
-  // One recording at a time, system-wide — the virtual display + VNC port above are a
-  // single shared resource (not per-test), which is a deliberate simplification: this is
-  // a single small container, not a fleet of recording workers.
   private sessions = new Map<string, RecordingSession>();
 
   constructor(
@@ -45,17 +29,9 @@ export class RecordingService {
     private readonly tests: TestsService,
   ) {}
 
-  isActive(testId: string): boolean {
-    return this.sessions.has(testId);
-  }
-
-  async start(userId: string, projectId: string, testId: string): Promise<{ started: boolean; vncEnabled: boolean }> {
-    if (this.sessions.size > 0) {
-      throw new Error(
-        this.sessions.has(testId)
-          ? 'A recording is already in progress for this test'
-          : 'A recording is already in progress for another test — only one at a time is supported',
-      );
+  async start(userId: string, projectId: string, testId: string): Promise<{ started: boolean }> {
+    if (this.sessions.has(testId)) {
+      throw new Error('A recording is already in progress for this test');
     }
     const test = await this.tests.findOne(userId, projectId, testId);
     if (!test.targetUrl) throw new Error('Test has no target URL to record against');
@@ -72,34 +48,14 @@ export class RecordingService {
       // persisted profile/cookies unless --save-storage is used) — that already IS
       // incognito-equivalent, so no extra flag is needed here; documented for clarity.
     }
-
-    let virtualDisplay: RecordingSession['virtualDisplay'];
-    const codegenEnv = { ...process.env };
-
-    if (NEEDS_VIRTUAL_DISPLAY) {
-      const xvfb = spawn('Xvfb', [VNC_DISPLAY, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], {}) as ChildProcessWithoutNullStreams;
-      // Xvfb needs a beat to create its display/socket before anything tries to use it —
-      // there's no clean "ready" signal to wait on short of polling for the X socket file,
-      // and a fixed short delay is simpler and reliable enough for a single local process.
-      await new Promise((r) => setTimeout(r, 400));
-      const x11vnc = spawn(
-        'x11vnc',
-        ['-display', VNC_DISPLAY, '-forever', '-shared', '-nopw', '-rfbport', String(VNC_PORT), '-noxdamage', '-quiet'],
-        {},
-      ) as ChildProcessWithoutNullStreams;
-      await new Promise((r) => setTimeout(r, 400));
-      virtualDisplay = { xvfb, x11vnc };
-      codegenEnv.DISPLAY = VNC_DISPLAY;
-    }
-
-    const child = spawn('npx', args, { shell: true, env: codegenEnv });
+    const child = spawn('npx', args, { shell: true });
 
     let resolveResult: (steps: RecordedStep[]) => void;
     const result = new Promise<RecordedStep[]>((resolve) => {
       resolveResult = resolve;
     });
 
-    const session: RecordingSession = { process: child, virtualDisplay, outputFile, startedAt: Date.now(), result };
+    const session: RecordingSession = { process: child, outputFile, startedAt: Date.now(), result };
     this.sessions.set(testId, session);
 
     // The recorder's browser window can close for reasons OTHER than the user clicking
@@ -114,7 +70,6 @@ export class RecordingService {
         // Give the file system a brief moment to flush codegen's final write.
         await new Promise((r) => setTimeout(r, 500));
         const steps = await this.persistRecording(testId, outputFile);
-        killVirtualDisplay(virtualDisplay);
         // Only remove the session once persistence is actually done — status() staying
         // "recording: true" a little longer than the real browser window is alive is far
         // better than the frontend's poll seeing "not recording" and reloading the test
@@ -124,7 +79,7 @@ export class RecordingService {
       })();
     });
 
-    return { started: true, vncEnabled: !!virtualDisplay };
+    return { started: true };
   }
 
   async stop(testId: string): Promise<{ stopped: boolean; steps?: unknown[] }> {
@@ -156,13 +111,9 @@ export class RecordingService {
     return { stopped: true, steps };
   }
 
-  status(testId: string): { recording: boolean; elapsedMs: number | null; vncEnabled: boolean } {
+  status(testId: string): { recording: boolean; elapsedMs: number | null } {
     const session = this.sessions.get(testId);
-    return {
-      recording: !!session,
-      elapsedMs: session ? Date.now() - session.startedAt : null,
-      vncEnabled: !!session?.virtualDisplay,
-    };
+    return { recording: !!session, elapsedMs: session ? Date.now() - session.startedAt : null };
   }
 
   private async persistRecording(testId: string, outputFile: string): Promise<RecordedStep[]> {
@@ -174,20 +125,6 @@ export class RecordingService {
     await this.prisma.test.update({ where: { id: testId }, data: { steps: steps as object[] } });
     await materializeLocators(this.prisma, testId, steps);
     return steps;
-  }
-}
-
-function killVirtualDisplay(virtualDisplay: RecordingSession['virtualDisplay']): void {
-  if (!virtualDisplay) return;
-  try {
-    virtualDisplay.x11vnc.kill('SIGTERM');
-  } catch {
-    // already exited
-  }
-  try {
-    virtualDisplay.xvfb.kill('SIGTERM');
-  } catch {
-    // already exited
   }
 }
 
