@@ -531,7 +531,7 @@ export default function TestDetail(): JSX.Element {
             {needsWeb && (
               <label
                 className="flex items-center gap-1.5 text-xs text-muted mr-1"
-                title="Launch a visible browser window for the next run"
+                title="Launch a visible browser window for the next run (local backend only — a hosted backend has no screen to show it on, and runs headless regardless)"
               >
                 <input
                   type="checkbox"

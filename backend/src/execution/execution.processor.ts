@@ -387,7 +387,13 @@ export class ExecutionProcessor extends WorkerHost {
         `--output=${outputDir}`,
         `--retries=${retries}`,
       ];
-      if (headed) args.push('--headed');
+      // "Headed" is a local-debugging convenience — on a headless Linux host (Render, any
+      // server with no real display) there's no screen for it to open on and no one
+      // watching it live anyway, so Chromium just crashes instead ("Target page, context
+      // or browser has been closed" / "no XServer running"). Silently fall back to
+      // headless there rather than failing every run someone left "Headed" checked.
+      const hasDisplay = process.platform !== 'linux' || !!process.env.DISPLAY;
+      if (headed && hasDisplay) args.push('--headed');
       const child = spawn('npx', args, { shell: true, cwd: process.cwd(), env: process.env });
       let output = '';
       const scanner = new StepEventScanner();
