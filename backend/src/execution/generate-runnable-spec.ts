@@ -201,7 +201,11 @@ function actionToCall(step: RecordedStep, descriptorVar: string): string {
 /** Inlined healing runtime: same Observe -> Diagnose (heuristic) -> Diagnose (LLM) ->
  *  Verify -> Persist loop as self-healing/SelfHealingEngine.ts in the sibling QA
  *  platform, condensed for inline embedding. */
-const RUNTIME_PRELUDE = `import { test, expect } from '@playwright/test';
+// hyperbrowser-fixtures re-exports the exact same test/expect from '@playwright/test' when
+// no Hyperbrowser session is active for this run (the normal, local case) — only swaps in
+// a Hyperbrowser-connected page when execution.processor.ts set HYPERBROWSER_WS_ENDPOINT.
+// Path is relative to this spec's own location: tmp/execution/<runId>/spec.spec.ts.
+const RUNTIME_PRELUDE = `import { test, expect } from '../../../src/execution/runtime/hyperbrowser-fixtures';
 
 const healEvents = [];
 

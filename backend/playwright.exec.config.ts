@@ -11,6 +11,11 @@ import { defineConfig } from '@playwright/test';
  * regression diffing (ExecutionProcessor.diffAgainstVisualBaseline) needs an image to
  * compare against a test's baseline even on a run that otherwise passed.
  */
+// Hyperbrowser connections do NOT go through this config's `use.connectOptions` — that
+// field speaks Playwright's own native browser-server protocol, not raw CDP, and hangs
+// forever against a CDP-only endpoint like Hyperbrowser's (confirmed live). See
+// hyperbrowser-fixtures.ts (imported by generated specs instead of '@playwright/test'
+// directly) for the actual connectOverCDP-based wiring.
 export default defineConfig({
   testDir: './tmp/execution',
   timeout: 60_000,

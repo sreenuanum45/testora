@@ -46,6 +46,14 @@ const STRATEGY_OPTIONS = [
   "CSS",
 ] as const;
 
+/** Hyperbrowser's liveUrl is a cross-origin iframe, so a double-click gesture *inside* the
+ *  embedded view can never reach our page's JS (the browser blocks that for security,
+ *  no matter what we build) — a real, separate popped-out window is the reliable way to
+ *  get a bigger, more comfortable surface to actually record against. */
+function openLiveViewWindow(liveUrl: string): void {
+  window.open(liveUrl, "testora-recording", "noopener,noreferrer,width=1500,height=1000");
+}
+
 export default function TestDetail(): JSX.Element {
   const { testId } = useParams<{ testId: string }>();
   const [searchParams] = useSearchParams();
@@ -576,19 +584,30 @@ export default function TestDetail(): JSX.Element {
 
         {recording && (
           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-sm text-emerald-700">
                 ● Recording in progress — {(elapsedMs / 1000).toFixed(0)}s.{" "}
                 {liveUrl
                   ? "Click and type in the live view below — every action is captured."
                   : "A browser window is open on the server."}
               </span>
-              <button
-                className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs shrink-0"
-                onClick={stopRecording}
-              >
-                Stop Recording
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {liveUrl && (
+                  <button
+                    className="px-3 py-1.5 rounded-lg bg-panel border border-border text-xs"
+                    onClick={() => openLiveViewWindow(liveUrl)}
+                    title="Open the live view in its own full-size window — easier than the embedded preview for anything more than a quick click"
+                  >
+                    Open in separate window ⤢
+                  </button>
+                )}
+                <button
+                  className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs"
+                  onClick={stopRecording}
+                >
+                  Stop Recording
+                </button>
+              </div>
             </div>
             {liveUrl && (
               <iframe

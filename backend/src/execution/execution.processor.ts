@@ -14,6 +14,7 @@ import { classifyHealth } from '../tests/health-classification';
 import type { RecordedStep } from '../recording/step-parser';
 import type { ExecutionJobData } from './execution.service';
 import type { HealEventPayload } from './runtime/types';
+import { createHyperbrowserSession, stopHyperbrowserSession } from './runtime/hyperbrowser-client';
 
 const EXEC_ROOT = join(process.cwd(), 'tmp', 'execution');
 
@@ -366,7 +367,7 @@ export class ExecutionProcessor extends WorkerHost {
     };
   }
 
-  private spawnPlaywright(
+  private async spawnPlaywright(
     specPath: string,
     browser: string,
     outputDir: string,
@@ -374,46 +375,68 @@ export class ExecutionProcessor extends WorkerHost {
     headed: boolean,
     onEvent: (event: StepEvent) => Promise<void>,
   ): Promise<{ exitCode: number; output: string }> {
-    return new Promise((resolve) => {
-      // Playwright treats the file argument as a regex — on Windows, path.join()'s
-      // backslashes have special regex meaning (e.g. \e, \1) and silently break the
-      // match, producing "No tests found" instead of running the spec.
-      const args = [
-        'playwright',
-        'test',
-        '--config=playwright.exec.config.ts',
-        specPath.replace(/\\/g, '/'),
-        `--project=${browser}`,
-        `--output=${outputDir}`,
-        `--retries=${retries}`,
-      ];
-      // "Headed" is a local-debugging convenience — on a headless Linux host (Render, any
-      // server with no real display) there's no screen for it to open on and no one
-      // watching it live anyway, so Chromium just crashes instead ("Target page, context
-      // or browser has been closed" / "no XServer running"). Silently fall back to
-      // headless there rather than failing every run someone left "Headed" checked.
-      const hasDisplay = process.platform !== 'linux' || !!process.env.DISPLAY;
-      if (headed && hasDisplay) args.push('--headed');
-      const child = spawn('npx', args, { shell: true, cwd: process.cwd(), env: process.env });
-      let output = '';
-      const scanner = new StepEventScanner();
-      // Persist events one at a time, in the order they were emitted — a batch of
-      // un-awaited concurrent inserts from a single stdout chunk was silently dropping
-      // some events (visible as healing steps vanishing from the live log).
-      let eventChain: Promise<void> = Promise.resolve();
-      const onChunk = (chunk: Buffer) => {
-        const text = chunk.toString();
-        output += text;
-        for (const event of scanner.feed(text)) {
-          eventChain = eventChain.then(() => onEvent(event));
-        }
-      };
-      child.stdout.on('data', onChunk);
-      child.stderr.on('data', onChunk);
-      child.on('close', (code) => {
-        eventChain.finally(() => resolve({ exitCode: code ?? 1, output }));
+    // Every run goes through Hyperbrowser (stealth + captcha solving) when configured,
+    // instead of launching Chromium locally — a plain, undisguised browser gets served a
+    // bot-detection interstitial by plenty of real sites (Amazon among them) instead of
+    // the actual page, which no amount of locator healing can recover from since the
+    // element it's looking for was never on that page to begin with. Falls back to a
+    // normal local launch if Hyperbrowser itself is unreachable or out of credits, rather
+    // than failing every single run whenever Hyperbrowser has a bad moment.
+    const env = { ...process.env };
+    let hyperbrowserSessionId: string | null = null;
+    if (process.env.HYPERBROWSER_API_KEY) {
+      try {
+        const session = await createHyperbrowserSession(10);
+        hyperbrowserSessionId = session.id;
+        env.HYPERBROWSER_WS_ENDPOINT = session.wsEndpoint;
+      } catch (err) {
+        console.error('Hyperbrowser session creation failed, falling back to a local browser launch:', err);
+      }
+    }
+
+    try {
+      return await new Promise((resolve) => {
+        // Playwright treats the file argument as a regex — on Windows, path.join()'s
+        // backslashes have special regex meaning (e.g. \e, \1) and silently break the
+        // match, producing "No tests found" instead of running the spec.
+        const args = [
+          'playwright',
+          'test',
+          '--config=playwright.exec.config.ts',
+          specPath.replace(/\\/g, '/'),
+          `--project=${browser}`,
+          `--output=${outputDir}`,
+          `--retries=${retries}`,
+        ];
+        // "Headed" only makes sense for a locally-launched browser someone can actually
+        // see — moot once connected to a remote Hyperbrowser session (its own liveUrl is
+        // the only way to watch it, and this codepath doesn't wire that up for execution
+        // runs), and still needs the no-display fallback for the local-launch case below.
+        const hasDisplay = process.platform !== 'linux' || !!process.env.DISPLAY;
+        if (headed && hasDisplay && !env.HYPERBROWSER_WS_ENDPOINT) args.push('--headed');
+        const child = spawn('npx', args, { shell: true, cwd: process.cwd(), env });
+        let output = '';
+        const scanner = new StepEventScanner();
+        // Persist events one at a time, in the order they were emitted — a batch of
+        // un-awaited concurrent inserts from a single stdout chunk was silently dropping
+        // some events (visible as healing steps vanishing from the live log).
+        let eventChain: Promise<void> = Promise.resolve();
+        const onChunk = (chunk: Buffer) => {
+          const text = chunk.toString();
+          output += text;
+          for (const event of scanner.feed(text)) {
+            eventChain = eventChain.then(() => onEvent(event));
+          }
+        };
+        child.stdout.on('data', onChunk);
+        child.stderr.on('data', onChunk);
+        child.on('close', (code) => {
+          eventChain.finally(() => resolve({ exitCode: code ?? 1, output }));
+        });
       });
-    });
+    } finally {
+      if (hyperbrowserSessionId) await stopHyperbrowserSession(hyperbrowserSessionId);
+    }
   }
 
   private async persistHealEvents(runId: string, testId: string, healEventsPath: string): Promise<void> {

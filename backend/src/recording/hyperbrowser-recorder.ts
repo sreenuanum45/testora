@@ -1,14 +1,7 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import type { LlmProviderService } from '../llm/llm-provider.service';
 import type { RecordedStep } from './step-parser';
-
-const HYPERBROWSER_API = 'https://api.hyperbrowser.ai/api';
-
-interface HyperbrowserSession {
-  id: string;
-  liveUrl: string;
-  wsEndpoint: string;
-}
+import { createHyperbrowserSession, stopHyperbrowserSession, type HyperbrowserSession } from '../execution/runtime/hyperbrowser-client';
 
 /** Raw shape sent back by the in-page recorder script via exposeFunction — one per
  *  click/fill/check/select, plus a synthetic 'goto' for the initial page load. `html` is
@@ -21,33 +14,6 @@ interface RawEvent {
   roleName?: string;
   value?: string;
   html?: string;
-}
-
-function apiKey(): string {
-  const key = process.env.HYPERBROWSER_API_KEY;
-  if (!key) throw new Error('HYPERBROWSER_API_KEY is not set');
-  return key;
-}
-
-async function createSession(): Promise<HyperbrowserSession> {
-  const res = await fetch(`${HYPERBROWSER_API}/session`, {
-    method: 'POST',
-    headers: { 'x-api-key': apiKey(), 'Content-Type': 'application/json' },
-    // Auto-expire well past any realistic recording session — a stopped-but-not-closed
-    // tab shouldn't be able to burn the whole free-tier credit balance unattended.
-    body: JSON.stringify({ timeoutMinutes: 20 }),
-  });
-  if (!res.ok) throw new Error(`Hyperbrowser session create failed: ${res.status} ${await res.text()}`);
-  const data = (await res.json()) as { id: string; liveUrl: string; wsEndpoint: string };
-  return { id: data.id, liveUrl: data.liveUrl, wsEndpoint: data.wsEndpoint };
-}
-
-async function stopSession(id: string): Promise<void> {
-  try {
-    await fetch(`${HYPERBROWSER_API}/session/${id}`, { method: 'DELETE', headers: { 'x-api-key': apiKey() } });
-  } catch {
-    // best-effort — Hyperbrowser's own timeoutMinutes cap is the real backstop
-  }
 }
 
 /** Runs in the page itself (stringified via addInitScript, not bundled/typechecked with
@@ -202,7 +168,7 @@ export class HyperbrowserRecording {
   session: HyperbrowserSession | null = null;
 
   async start(targetUrl: string): Promise<{ liveUrl: string }> {
-    this.session = await createSession();
+    this.session = await createHyperbrowserSession(20);
     this.browser = await chromium.connectOverCDP(this.session.wsEndpoint);
     const context = this.browser.contexts()[0] ?? (await this.browser.newContext());
     this.page = context.pages()[0] ?? (await context.newPage());
@@ -232,7 +198,7 @@ export class HyperbrowserRecording {
     } catch {
       // remote side may already be gone
     }
-    if (this.session) await stopSession(this.session.id);
+    if (this.session) await stopHyperbrowserSession(this.session.id);
 
     return this.events.map(
       (e): RecordedStep =>
