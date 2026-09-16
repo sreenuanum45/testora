@@ -44,13 +44,29 @@ export async function exploreSite(targetUrl: string, timeoutSeconds = 60): Promi
       let usedFallback = false;
       let snapshot: string;
 
-      const snapshotFn = (page as unknown as { ariaSnapshot?: () => string }).ariaSnapshot;
-      if (typeof snapshotFn === 'function') {
-        snapshot = snapshotFn.call(page);
-      } else {
+      // Every path here MUST be awaited and caught: ariaSnapshot() returns a promise, and
+      // a floating one resolves/rejects after browser.close() below — an unhandled
+      // rejection, which is FATAL in Node 20 (crashed the deployed service as a 502 on
+      // every agents call before this fix). Locator-scoped snapshot is tried first
+      // (verified working against real Hyperbrowser sessions); page-level is the second
+      // attempt, and plaintext innerText is the final fallback so grounding never hard-
+      // fails the whole agent call just because one snapshot API misbehaved.
+      const body = page.locator('body');
+      const bodySnapFn = body.ariaSnapshot as unknown as ((options?: { timeout?: number }) => Promise<string>) | undefined;
+      const pageSnapFn = page.ariaSnapshot as unknown as ((options?: { timeout?: number }) => Promise<string>) | undefined;
+      try {
+        if (typeof bodySnapFn === 'function') {
+          snapshot = await bodySnapFn.call(body, { timeout: 15000 });
+        } else if (typeof pageSnapFn === 'function') {
+          snapshot = await pageSnapFn.call(page, { timeout: 15000 });
+        } else {
+          throw new Error('no ariaSnapshot API available');
+        }
+      } catch {
         usedFallback = true;
-        const text = await page.evaluate(() => document.body?.innerText ?? '');
-        snapshot = text;
+        snapshot = await page
+          .evaluate(() => document.body?.innerText ?? '')
+          .catch(() => '');
       }
 
       if (snapshot.length > SNAPSHOT_CHAR_LIMIT) {
