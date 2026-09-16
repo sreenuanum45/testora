@@ -16,6 +16,7 @@ import { SuitesModule } from './suites/suites.module';
 import { SchedulersModule } from './schedulers/schedulers.module';
 import { ApiTestingModule } from './api-testing/api-testing.module';
 import { NlpModule } from './nlp/nlp.module';
+import { AgentsModule } from './agents/agents.module';
 import { ComponentsModule } from './components/components.module';
 import { DataSetsModule } from './datasets/datasets.module';
 
@@ -44,6 +45,7 @@ import { DataSetsModule } from './datasets/datasets.module';
     SchedulersModule,
     ApiTestingModule,
     NlpModule,
+    AgentsModule,
     ComponentsModule,
     DataSetsModule,
   ],

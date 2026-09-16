@@ -20,6 +20,7 @@ import {
   ImageIcon,
 } from "lucide-react";
 import { api } from "../api/client";
+import AgentsPanel from "../components/AgentsPanel";
 import { useAppStore } from "../store/appStore";
 import type {
   AssertionSuggestion,
@@ -764,6 +765,22 @@ export default function TestDetail(): JSX.Element {
             </div>
           )}
         </div>
+
+        <AgentsPanel
+          projectId={projectId ?? ""}
+          testId={testId ?? ""}
+          hasTargetUrl={!!test.targetUrl}
+          hasFailedRun={runs.some((r) => r.status === "FAILED")}
+          onApplySteps={(agentSteps) => {
+            // Each agent returns a COMPLETE step list (the Healer must replace; Planner/
+            // Generator plan the whole test), so loading them replaces the draft — and
+            // since this only touches the draft, nothing is lost until the user saves.
+            setDraftSteps(agentSteps);
+            setMessage(
+              "Agent steps loaded into the step builder — review and Save steps to apply.",
+            );
+          }}
+        />
 
         {test.locators && test.locators.length > 0 && (
           <div className="bg-panel border border-border rounded-2xl shadow-card p-6">

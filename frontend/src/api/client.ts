@@ -16,7 +16,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(body.message ?? `Request failed: ${res.status}`);
+    const detail = typeof body?.message === "string" ? body.message : Array.isArray(body?.message) ? body.message.join(", ") : res.statusText;
+    // surfaced verbatim so backend validation/LLM errors are actually readable in the UI
+    throw new Error(detail || `Request failed: ${res.status}`);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
